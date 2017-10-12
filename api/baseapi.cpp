@@ -39,6 +39,9 @@
 #include <dirent.h>
 #include <libgen.h>
 #include <string.h>
+#include <sys/types.h>
+#include <sys/stat.h>
+#include <unistd.h>
 #endif  // _WIN32
 
 #include <fstream>
@@ -99,15 +102,65 @@ const char* kInputFile = "noname.tif";
 const char* kOldVarsFile = "failed_vars.txt";
 /** Max string length of an int.  */
 const int kMaxIntSize = 22;
-/**
- * Minimum believable resolution. Used as a default if there is no other
- * information, as it is safer to under-estimate than over-estimate.
- */
-const int kMinCredibleResolution = 70;
-/** Maximum believable resolution.  */
-const int kMaxCredibleResolution = 2400;
-/** Default resolution.  */
-const int kDefaultResolution = 300;
+
+/* Add all available languages recursively.
+*/
+static void addAvailableLanguages(const STRING &datadir, const STRING &base,
+                                  GenericVector<STRING>* langs)
+{
+  const STRING base2 = (base.string()[0] == '\0') ? base : base + "/";
+  const size_t extlen = sizeof(kTrainedDataSuffix);
+#ifdef _WIN32
+    WIN32_FIND_DATA data;
+    HANDLE handle = FindFirstFile((datadir + base2 + "*").string(), &data);
+    if (handle != INVALID_HANDLE_VALUE) {
+      BOOL result = TRUE;
+      for (; result;) {
+        char *name = data.cFileName;
+        // Skip '.', '..', and hidden files
+        if (name[0] != '.') {
+          if ((data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) ==
+              FILE_ATTRIBUTE_DIRECTORY) {
+            addAvailableLanguages(datadir, base2 + name, langs);
+          } else {
+            size_t len = strlen(name);
+            if (len > extlen && name[len - extlen] == '.' &&
+                strcmp(&name[len - extlen + 1], kTrainedDataSuffix) == 0) {
+              name[len - extlen] = '\0';
+              langs->push_back(base2 + name);
+            }
+          }
+        }
+        result = FindNextFile(handle, &data);
+      }
+      FindClose(handle);
+    }
+#else  // _WIN32
+  DIR* dir = opendir((datadir + base).string());
+  if (dir != NULL) {
+    dirent *de;
+    while ((de = readdir(dir))) {
+      char *name = de->d_name;
+      // Skip '.', '..', and hidden files
+      if (name[0] != '.') {
+        struct stat st;
+        if (stat((datadir + base2 + name).string(), &st) == 0 &&
+            (st.st_mode & S_IFDIR) == S_IFDIR) {
+          addAvailableLanguages(datadir, base2 + name, langs);
+        } else {
+          size_t len = strlen(name);
+          if (len > extlen && name[len - extlen] == '.' &&
+              strcmp(&name[len - extlen + 1], kTrainedDataSuffix) == 0) {
+            name[len - extlen] = '\0';
+            langs->push_back(base2 + name);
+          }
+        }
+      }
+    }
+    closedir(dir);
+  }
+#endif
+}
 
 TessBaseAPI::TessBaseAPI()
     : tesseract_(nullptr),
@@ -393,45 +446,7 @@ void TessBaseAPI::GetAvailableLanguagesAsVector(
     GenericVector<STRING>* langs) const {
   langs->clear();
   if (tesseract_ != NULL) {
-#ifdef _WIN32
-    STRING pattern = tesseract_->datadir + "/*." + kTrainedDataSuffix;
-    char fname[_MAX_FNAME];
-    WIN32_FIND_DATA data;
-    BOOL result = TRUE;
-    HANDLE handle = FindFirstFile(pattern.string(), &data);
-    if (handle != INVALID_HANDLE_VALUE) {
-      for (; result; result = FindNextFile(handle, &data)) {
-        _splitpath(data.cFileName, NULL, NULL, fname, NULL);
-        langs->push_back(STRING(fname));
-      }
-      FindClose(handle);
-    }
-#else  // _WIN32
-    DIR *dir;
-    struct dirent *dirent;
-    char *dot;
-
-    STRING extension = STRING(".") + kTrainedDataSuffix;
-
-    dir = opendir(tesseract_->datadir.string());
-    if (dir != NULL) {
-      while ((dirent = readdir(dir))) {
-        // Skip '.', '..', and hidden files
-        if (dirent->d_name[0] != '.') {
-          if (strstr(dirent->d_name, extension.string()) != NULL) {
-            dot = strrchr(dirent->d_name, '.');
-            // This ensures that .traineddata is at the end of the file name
-            if (strncmp(dot, extension.string(),
-                        strlen(extension.string())) == 0) {
-              *dot = '\0';
-              langs->push_back(STRING(dirent->d_name));
-            }
-          }
-        }
-      }
-      closedir(dir);
-    }
-#endif
+    addAvailableLanguages(tesseract_->datadir, "", langs);
   }
 }
 
@@ -1050,7 +1065,7 @@ bool TessBaseAPI::ProcessPages(const char* filename, const char* retry_config,
 }
 
 // In the ideal scenario, Tesseract will start working on data as soon
-// as it can. For example, if you steam a filelist through stdin, we
+// as it can. For example, if you stream a filelist through stdin, we
 // should start the OCR process as soon as the first filename is
 // available. This is particularly useful when hooking Tesseract up to
 // slow hardware such as a book scanning machine.
@@ -2201,8 +2216,8 @@ bool TessBaseAPI::Threshold(Pix** pix) {
     // Use the minimum default resolution, as it is safer to under-estimate
     // than over-estimate resolution.
     tprintf("Warning. Invalid resolution %d dpi. Using %d instead.\n", y_res,
-            kDefaultResolution);
-    thresholder_->SetSourceYResolution(kDefaultResolution);
+            kMinCredibleResolution);
+    thresholder_->SetSourceYResolution(kMinCredibleResolution);
   }
   PageSegMode pageseg_mode =
       static_cast<PageSegMode>(
